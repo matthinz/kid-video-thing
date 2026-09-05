@@ -6,16 +6,27 @@
 import Foundation
 import Observation
 
-/// One video, as the main list shows it.
-struct LibraryVideo: Identifiable {
-    /// The video's URL — stable across a re-download, unlike the database row.
-    var id: String { url }
+/// A Slack message a video was asked for in.
+struct SlackMessage: Hashable {
+    var channel: String
+    var timestamp: String
+}
 
-    var recordID: Int64?
+/// One video, as the main list shows it.
+///
+/// A video can hold several database rows: the same YouTube video posted twice
+/// arrives as `youtu.be/X`, `watch?v=X`, `watch?v=X&t=2s` — three URLs, one file
+/// on disk. Rows are collapsed by video ID, so the list shows the file once, its
+/// size counts once, and deleting it accounts for every row and message involved.
+struct LibraryVideo: Identifiable {
+    /// The YouTube video ID, or the URL when there isn't one to extract.
+    var id: String
+
+    /// Every database row this collapses, newest first.
+    var recordIDs: [Int64] = []
+    /// Every Slack message that asked for it.
+    var messages: [SlackMessage] = []
     var url: String
-    /// The Slack message this came from, empty for a manually added video.
-    var channel = ""
-    var messageTS = ""
 
     var filePath: String?
     var status: VideoStore.Status
@@ -83,51 +94,72 @@ final class Library {
         let entries = await store.allEntries()
         let active = downloads.downloads
 
-        // Newest row wins when a URL has been downloaded more than once. Playlists
-        // are skipped — a playlist is a container whose members each have a row of
-        // their own, so it is not a video file and gets no line in the list.
-        var byURL: [String: LibraryVideo] = [:]
+        // Entries arrive newest first, so the first row seen for a video supplies
+        // its details and later ones only contribute their row id and message.
+        // Playlists are skipped — a playlist is a container whose members each
+        // have a row of their own, so it is not a video file.
+        var byVideo: [String: LibraryVideo] = [:]
         var order: [String] = []
-        for entry in entries
-        where byURL[entry.url] == nil && !YouTubeLink.isPlaylist(entry.url) {
+
+        for entry in entries where !YouTubeLink.isPlaylist(entry.url) {
+            let key = Self.key(for: entry.url)
+            let message = SlackMessage(channel: entry.channel, timestamp: entry.messageTS)
+
+            if byVideo[key] != nil {
+                byVideo[key]?.recordIDs.append(entry.id)
+                if !message.channel.isEmpty, byVideo[key]?.messages.contains(message) == false {
+                    byVideo[key]?.messages.append(message)
+                }
+                continue
+            }
+
             let file = Self.fileInfo(entry.filePath)
-            byURL[entry.url] = LibraryVideo(
-                recordID: entry.id,
+            byVideo[key] = LibraryVideo(
+                id: key,
+                recordIDs: [entry.id],
+                messages: message.channel.isEmpty ? [] : [message],
                 url: entry.url,
-                channel: entry.channel,
-                messageTS: entry.messageTS,
                 filePath: entry.filePath,
                 status: entry.status,
                 viewCount: entry.viewCount,
                 lastViewedAt: entry.lastViewedAt,
-                download: active.first { $0.videoURL == entry.url },
+                download: active.first { Self.key(for: $0.videoURL) == key },
                 fileExists: file.exists,
                 posterPath: Self.poster(for: entry.filePath),
                 downloadedAt: file.modified ?? entry.updatedAt,
                 sizeBytes: file.size ?? entry.sizeBytes,
                 tags: entry.tags)
-            order.append(entry.url)
+            order.append(key)
         }
 
         // Anything queued in the last instant has no row yet.
-        for download in active where byURL[download.videoURL] == nil {
-            byURL[download.videoURL] = LibraryVideo(
-                recordID: download.recordID,
+        for download in active {
+            let key = Self.key(for: download.videoURL)
+            guard byVideo[key] == nil else { continue }
+            let file = Self.fileInfo(download.destination?.path)
+            byVideo[key] = LibraryVideo(
+                id: key,
+                recordIDs: download.recordID.map { [$0] } ?? [],
                 url: download.videoURL,
                 filePath: download.destination?.path,
                 status: .downloading,
                 download: download,
-                fileExists: Self.fileInfo(download.destination?.path).exists,
+                fileExists: file.exists,
                 posterPath: Self.poster(for: download.destination?.path),
                 downloadedAt: Date(),
-                sizeBytes: Self.fileInfo(download.destination?.path).size)
-            order.insert(download.videoURL, at: 0)
+                sizeBytes: file.size)
+            order.insert(key, at: 0)
         }
 
         // Whatever is downloading stays pinned at the top — it's the thing
         // happening right now — and everything else sorts by how it's been used.
-        let all = order.compactMap { byURL[$0] }.sorted(by: Self.isOrderedBefore)
+        let all = order.compactMap { byVideo[$0] }.sorted(by: Self.isOrderedBefore)
         videos = all.filter(\.isDownloading) + all.filter { !$0.isDownloading }
+    }
+
+    /// What identifies a video across the several URLs that can name it.
+    private static func key(for url: String) -> String {
+        CoverArt.videoID(from: url) ?? url
     }
 
     /// Most recently watched first, then most recently downloaded. Videos nobody

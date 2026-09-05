@@ -170,6 +170,24 @@ actor VideoStore {
         if sqlite3_step(statement) != SQLITE_DONE { log("Size update failed: \(lastError)") }
     }
 
+    /// Row ids, other than `excluding`, that still claim a file. A file belongs to
+    /// one video; two live rows pointing at it means something went wrong.
+    func claimants(filePath: String, excluding id: Int64) -> [Int64] {
+        let sql = "SELECT id FROM videos WHERE file_path = ? AND status != ? AND id != ?;"
+        guard let statement = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement, 1, filePath)
+        bind(statement, 2, Status.deleted.rawValue)
+        sqlite3_bind_int64(statement, 3, id)
+
+        var ids: [Int64] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            ids.append(sqlite3_column_int64(statement, 0))
+        }
+        return ids
+    }
+
     /// Replaces the emoji recorded against one video. Membership is per video —
     /// a playlist can hold three episodes out of a message's twenty-three.
     func setTags(id: Int64, tags: [String]) {

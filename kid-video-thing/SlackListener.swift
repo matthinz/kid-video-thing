@@ -735,6 +735,19 @@ final class SlackListener {
                 }
             }
 
+            // A file belongs to one video. Locating by ID can turn up a file that
+            // another live row already owns — the same video posted under two
+            // URLs — and claiming it here is what produced duplicate `done` rows
+            // pointing at a single file.
+            let claimants = await store.claimants(filePath: current.path, excluding: entry.id)
+            guard claimants.isEmpty else {
+                note(
+                    "\(current.lastPathComponent) already belongs to row \(claimants[0]) — "
+                        + "leaving \(entry.id) alone.")
+                updated.append(entry)
+                continue
+            }
+
             // Rows downloaded before sizes were recorded get one now.
             if entry.sizeBytes == nil {
                 await store.recordSize(id: entry.id, filePath: current.path)

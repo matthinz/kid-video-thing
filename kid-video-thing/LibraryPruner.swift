@@ -92,7 +92,9 @@ final class LibraryPruner {
                 note("Couldn't delete \(video.title): \(error.localizedDescription)")
                 continue
             }
-            if let recordID = video.recordID {
+            // Every row for this video, not just one — the same file can be
+            // recorded against more than one message.
+            for recordID in video.recordIDs {
                 await store.finish(id: recordID, status: .deleted, filePath: nil)
             }
             remaining -= video.sizeBytes ?? 0
@@ -123,8 +125,8 @@ final class LibraryPruner {
     private func markDeleted(_ evicted: [LibraryVideo]) async {
         let messages = Set(
             evicted
-                .filter { !$0.channel.isEmpty && !$0.messageTS.isEmpty }
-                .map { Message(channel: $0.channel, timestamp: $0.messageTS) })
+                .flatMap(\.messages)
+                .filter { !$0.channel.isEmpty && !$0.timestamp.isEmpty })
         guard !messages.isEmpty, !settings.slackBotToken.isEmpty else { return }
 
         let client = self.client
@@ -141,11 +143,6 @@ final class LibraryPruner {
             try? await client.addReaction(
                 .deleted, channel: message.channel, timestamp: message.timestamp)
         }
-    }
-
-    private struct Message: Hashable {
-        var channel: String
-        var timestamp: String
     }
 
     private func format(_ bytes: Int64) -> String {
