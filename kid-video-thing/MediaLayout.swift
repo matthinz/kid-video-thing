@@ -76,9 +76,22 @@ nonisolated enum MediaLayout {
     ///
     /// The ID suffix is kept because everything that finds this file again looks
     /// for it — `locate(videoID:in:)`, and Plex, which matches its own items back
-    /// to our rows by the ID in the path. The folder and the file are renamed
-    /// together so the layout stays one-folder-per-video; `isOrganized` requires
-    /// the two names to agree.
+    /// to our rows by the ID in the path. The layout stays one-folder-per-video;
+    /// `isOrganized` requires the folder and file names to agree.
+    ///
+    /// **The order here is for Plex's benefit.** The new folder is built up rather
+    /// than the old one renamed: poster first, then the video, then anything else
+    /// left over, and only then is the old folder removed. Plex watches the
+    /// library directory and rescans what changes, so it can look at a
+    /// half-finished rename — and what it must never catch is a video file with no
+    /// artwork beside it, because it will index the item without a poster and keep
+    /// that answer. Putting `poster.jpg` in place before the video appears means
+    /// the folder is never observably a video without its cover.
+    ///
+    /// Renaming the folder instead has the same problem one level up: the whole
+    /// subtree disappears and reappears under a new name, and the intermediate
+    /// step needed to get the file's own name right leaves the folder briefly
+    /// holding a video that doesn't match it.
     ///
     /// Returns the video's new location. A rename onto a name already in use is
     /// left alone rather than clobbering it.
@@ -104,17 +117,38 @@ nonisolated enum MediaLayout {
 
         guard !manager.fileExists(atPath: newFolder.path) else { return organized }
 
-        // The file moves first, while its folder still has the old name: renaming
-        // the folder first would leave the file's own name stale if this threw.
-        let staged = organized.deletingLastPathComponent().appending(
-            path: newFile.lastPathComponent)
-        try manager.moveItem(at: organized, to: staged)
+        let oldFolder = organized.deletingLastPathComponent()
+        try manager.createDirectory(at: newFolder, withIntermediateDirectories: true)
+
+        // Poster first, so the video is never sitting in a folder without it.
+        let oldPoster = oldFolder.appending(path: posterName)
+        var posterMoved = false
+        if manager.fileExists(atPath: oldPoster.path) {
+            try manager.moveItem(at: oldPoster, to: newFolder.appending(path: posterName))
+            posterMoved = true
+        }
+
+        // Then the video. If this fails the poster goes back where it was and the
+        // empty new folder is cleared away, so a failed rename changes nothing.
         do {
-            try manager.moveItem(at: staged.deletingLastPathComponent(), to: newFolder)
+            try manager.moveItem(at: organized, to: newFile)
         } catch {
-            try? manager.moveItem(at: staged, to: organized)
+            if posterMoved {
+                try? manager.moveItem(at: newFolder.appending(path: posterName), to: oldPoster)
+            }
+            try? manager.removeItem(at: newFolder)
             throw error
         }
+
+        // Then everything else the folder was holding — subtitles, .nfo, whatever
+        // yt-dlp left behind. These are extras: failing to bring one across isn't
+        // worth undoing a rename that has otherwise worked.
+        for leftover in contents(of: oldFolder) {
+            try? manager.moveItem(
+                at: leftover, to: newFolder.appending(path: leftover.lastPathComponent))
+        }
+        try? manager.removeItem(at: oldFolder)
+
         return newFile
     }
 
