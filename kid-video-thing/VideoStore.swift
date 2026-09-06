@@ -37,6 +37,12 @@ actor VideoStore {
         var sizeBytes: Int64?
         /// Emoji reacted onto this video's Slack message.
         var tags: [String] = []
+        /// The name yt-dlp gave this video, kept from the first rename so undo
+        /// always has something to go back to. Nil means it's never been renamed.
+        var originalName: String?
+        /// The playlist context the current title was cleaned against — the
+        /// playlist emoji, sorted and joined. Empty means "no playlist".
+        var titleContext: String?
     }
 
     /// Nil when the database couldn't be opened — every operation then becomes a
@@ -93,9 +99,25 @@ actor VideoStore {
         // ALTER fails harmlessly once they're there, so the error is the check.
         for column in [
             "view_count INTEGER", "last_viewed_at REAL", "size_bytes INTEGER", "tags TEXT",
+            "original_name TEXT", "title_context TEXT",
         ] {
             sqlite3_exec(handle, "ALTER TABLE videos ADD COLUMN \(column);", nil, nil, nil)
         }
+
+        // Titles already cleaned for a given playlist context, so removing a
+        // reaction and putting it back doesn't pay for the same answer twice.
+        // Keyed on the video ID rather than a row id: the same video can hold
+        // several rows, and they all share one file on disk.
+        sqlite3_exec(
+            handle,
+            """
+            CREATE TABLE IF NOT EXISTS title_cache (
+                video_id TEXT NOT NULL,
+                context TEXT NOT NULL,
+                title TEXT NOT NULL,
+                PRIMARY KEY (video_id, context)
+            );
+            """, nil, nil, nil)
     }
 
     deinit {
@@ -200,6 +222,74 @@ actor VideoStore {
         if sqlite3_step(statement) != SQLITE_DONE { log("Tag update failed: \(lastError)") }
     }
 
+    /// Records where a video ended up after a rename, and what it started as.
+    ///
+    /// `originalName` is only written the first time — every later rename starts
+    /// from the same yt-dlp name, so undo always lands back at the real original
+    /// rather than at whatever the previous cleanup produced.
+    func recordRename(
+        id: Int64, filePath: String, originalName: String, titleContext: String
+    ) {
+        let sql = """
+            UPDATE videos SET
+                file_path = ?,
+                original_name = COALESCE(original_name, ?),
+                title_context = ?,
+                updated_at = ?
+            WHERE id = ?;
+            """
+        guard let statement = prepare(sql) else { return }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement, 1, filePath)
+        bind(statement, 2, originalName)
+        bind(statement, 3, titleContext)
+        sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(statement, 5, id)
+        if sqlite3_step(statement) != SQLITE_DONE { log("Rename update failed: \(lastError)") }
+    }
+
+    /// Forgets that a video was ever renamed, after its file has been put back.
+    func clearRename(id: Int64, filePath: String) {
+        let sql = """
+            UPDATE videos SET file_path = ?, original_name = NULL, title_context = NULL,
+                updated_at = ? WHERE id = ?;
+            """
+        guard let statement = prepare(sql) else { return }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement, 1, filePath)
+        sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(statement, 3, id)
+        if sqlite3_step(statement) != SQLITE_DONE { log("Rename clear failed: \(lastError)") }
+    }
+
+    /// A title already cleaned for this video under this playlist context.
+    func cachedTitle(videoID: String, context: String) -> String? {
+        let sql = "SELECT title FROM title_cache WHERE video_id = ? AND context = ?;"
+        guard let statement = prepare(sql) else { return nil }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement, 1, videoID)
+        bind(statement, 2, context)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return text(statement, 0)
+    }
+
+    func cacheTitle(videoID: String, context: String, title: String) {
+        let sql = """
+            INSERT INTO title_cache (video_id, context, title) VALUES (?, ?, ?)
+            ON CONFLICT (video_id, context) DO UPDATE SET title = excluded.title;
+            """
+        guard let statement = prepare(sql) else { return }
+        defer { sqlite3_finalize(statement) }
+
+        bind(statement, 1, videoID)
+        bind(statement, 2, context)
+        bind(statement, 3, title)
+        if sqlite3_step(statement) != SQLITE_DONE { log("Title cache failed: \(lastError)") }
+    }
+
     private static func fileSize(_ path: String?) -> Int64? {
         guard let path,
             let values = try? URL(filePath: path).resourceValues(forKeys: [.fileSizeKey]),
@@ -211,7 +301,7 @@ actor VideoStore {
     private static let columns =
         """
         id, channel, message_ts, url, file_path, status, view_count, last_viewed_at, \
-        created_at, updated_at, size_bytes, tags
+        created_at, updated_at, size_bytes, tags, original_name, title_context
         """
 
     /// Everything downloaded for one Slack message, newest first.
@@ -284,7 +374,9 @@ actor VideoStore {
                     sizeBytes: isNull(statement, 10)
                         ? nil
                         : sqlite3_column_int64(statement, 10),
-                    tags: (text(statement, 11) ?? "").split(separator: " ").map(String.init)))
+                    tags: (text(statement, 11) ?? "").split(separator: " ").map(String.init),
+                    originalName: text(statement, 12),
+                    titleContext: text(statement, 13)))
         }
         return entries
     }

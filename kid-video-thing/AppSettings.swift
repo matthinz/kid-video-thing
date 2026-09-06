@@ -20,6 +20,9 @@ final class AppSettings {
         static let plexSyncMinutes = "plexSyncMinutes"
         static let plexToken = "plexToken"
         static let maxDiskUsageGB = "maxDiskUsageGB"
+        static let claudeAPIKey = "claudeAPIKey"
+        static let claudeModel = "claudeModel"
+        static let cleanTitlesOnDownload = "cleanTitlesOnDownload"
     }
 
     /// How often to re-read viewing figures from Plex, when nothing is set.
@@ -94,6 +97,23 @@ final class AppSettings {
         Int64(maxDiskUsageGB) * 1_000_000_000
     }
 
+    /// Anthropic API key (`sk-ant-…`) — used to tidy up video titles.
+    var claudeAPIKey: String {
+        didSet { defaults.set(claudeAPIKey, forKey: Key.claudeAPIKey) }
+    }
+
+    /// Which Claude model cleans titles. Unrecognized values fall back to the
+    /// default, so a model retired out from under a saved setting still works.
+    var claudeModel: ClaudeClient.Model {
+        didSet { defaults.set(claudeModel.rawValue, forKey: Key.claudeModel) }
+    }
+
+    /// Whether to clean a title automatically when a video first arrives, and
+    /// again when its playlists change. The per-video button works either way.
+    var cleanTitlesOnDownload: Bool {
+        didSet { defaults.set(cleanTitlesOnDownload, forKey: Key.cleanTitlesOnDownload) }
+    }
+
     private let defaults: UserDefaults
 
     static var defaultDownloadDirectory: URL {
@@ -123,6 +143,15 @@ final class AppSettings {
             defaults.object(forKey: Key.maxDiskUsageGB) == nil
             ? Self.defaultMaxDiskUsageGB
             : max(1, defaults.integer(forKey: Key.maxDiskUsageGB))
+        claudeAPIKey = defaults.string(forKey: Key.claudeAPIKey) ?? ""
+        claudeModel =
+            defaults.string(forKey: Key.claudeModel).flatMap(ClaudeClient.Model.init(rawValue:))
+            ?? .default
+        // Unset means on: the whole point of the feature is that it just happens.
+        cleanTitlesOnDownload =
+            defaults.object(forKey: Key.cleanTitlesOnDownload) == nil
+            ? true
+            : defaults.bool(forKey: Key.cleanTitlesOnDownload)
     }
 
     /// Creates the download directory if it isn't there yet.

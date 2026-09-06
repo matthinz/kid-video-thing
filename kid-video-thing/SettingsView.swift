@@ -15,6 +15,8 @@ struct SettingsView: View {
                 .tabItem { Label("Slack", systemImage: "bubble.left.and.bubble.right") }
             PlexSettings()
                 .tabItem { Label("Plex", systemImage: "play.tv") }
+            ClaudeSettings()
+                .tabItem { Label("Claude", systemImage: "wand.and.stars") }
         }
         .frame(width: 560)
     }
@@ -231,6 +233,78 @@ private struct PlexSettings: View {
     }
 }
 
+private struct ClaudeSettings: View {
+    @Environment(AppSettings.self) private var settings
+    @Environment(TitleCleaner.self) private var titles
+
+    var body: some View {
+        @Bindable var settings = settings
+
+        Form {
+            Section("Connection") {
+                SecureField(
+                    "API Key", text: $settings.claudeAPIKey, prompt: Text("sk-ant-…"))
+                Picker("Model", selection: $settings.claudeModel) {
+                    ForEach(ClaudeClient.Model.allCases) { model in
+                        Text(model.displayName).tag(model)
+                    }
+                }
+                Text(settings.claudeModel.priceNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(
+                    """
+                    Create a key at console.anthropic.com. Cleaning one title is a \
+                    request of a few dozen tokens, so a library's worth costs a \
+                    fraction of a cent. Leave the key blank and title cleanup is \
+                    simply off.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Section("Title Cleanup") {
+                Toggle(
+                    "Clean up titles automatically", isOn: $settings.cleanTitlesOnDownload)
+                Text(
+                    """
+                    YouTube titles are written for search, not for reading: \
+                    "Pizza Bean Mr Bean Cartoon Season 2 Full Episodes Mr Bean \
+                    Official" is the "Pizza Bean" episode. Claude cuts it back and \
+                    the video's folder is renamed on disk, so Plex shows the tidy \
+                    name too. The YouTube ID stays in the filename, so nothing \
+                    loses track of which video it is.
+
+                    When a video joins a Plex playlist the title is cleaned again \
+                    with the playlist's name as context — in "Mr Bean Cartoon" the \
+                    show's name is repetition, so it goes. Taking the reaction off \
+                    puts the earlier title back.
+
+                    Every video also has a ✨ button in the list to do this by hand, \
+                    and to undo it.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if !titles.activity.isEmpty {
+                Section("Recent Renames") {
+                    ForEach(Array(titles.activity.prefix(8).enumerated()), id: \.offset) {
+                        _, line in
+                        Text(line)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
 private struct SlackSettings: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SlackListener.self) private var slack
@@ -352,7 +426,9 @@ private struct SlackSettings: View {
     let store = VideoStore()
     let downloads = DownloadManager(settings: settings, store: store)
     let library = Library(store: store, downloads: downloads)
-    let playlists = PlaylistSync(settings: settings, store: store, library: library)
+    let titles = TitleCleaner(settings: settings, store: store, library: library)
+    let playlists = PlaylistSync(
+        settings: settings, store: store, library: library, titles: titles)
     SettingsView()
         .environment(settings)
         .environment(downloads)
@@ -363,4 +439,5 @@ private struct SlackSettings: View {
         .environment(PlexSync(settings: settings, store: store, library: library))
         .environment(LibraryPruner(settings: settings, store: store, library: library))
         .environment(playlists)
+        .environment(titles)
 }

@@ -42,7 +42,7 @@ about it:
 | Place | Owns |
 |---|---|
 | **Slack** | What was requested, and by whom. Reactions are input, not state. |
-| **The app** | The record: which video, which file, how big, where it came from. |
+| **The app** | The record: which video, which file, how big, where it came from — and what it's called. |
 | **Plex** | What's been watched, and what's in which playlist. |
 
 ## Flow 1 — Slack to the app: getting a video
@@ -120,6 +120,46 @@ Two ways a video leaves:
 
 The video that just downloaded is never evicted; otherwise you'd watch it vanish.
 
+## Flow 6 — titles: from keyword soup to something readable
+
+YouTube titles are written to be found, not to be read. "Pizza Bean Mr Bean
+Cartoon Season 2 Full Episodes Mr Bean Official" is the "Pizza Bean" episode with
+the search terms bolted on, and that's what ends up on the shelf in Plex.
+
+When a video arrives, its title goes to the Claude API and comes back cut down to
+the part that identifies it. **The video's folder and file are then renamed on
+disk** — a database-only title would look right in the menu bar and wrong on the
+television, which is the screen that matters.
+
+```
+Pizza_Bean_Mr_Bean_Cartoon_Season_2_Full_Episodes_Mr_Bean_Official [exampleVid1]/
+                              ↓
+Pizza Bean [exampleVid1]/
+  Pizza Bean [exampleVid1].webm
+  poster.jpg
+```
+
+The `[exampleVid1]` suffix is never touched. Everything that finds a video again
+looks for that ID rather than the name — Plex matching, the ❌ reaction, the
+re-sync — so the title is the only part that's actually free to change.
+
+**Playlists are context.** Someone browsing "Mr Bean Cartoon" can already see
+whose cartoon it is, so joining that playlist re-runs the cleanup with the
+playlist name in hand and the show name drops out of the title. Removing the
+reaction runs it again with what's left. Every cleanup starts from the name
+yt-dlp originally chose rather than from the previous cleaned title, so guesswork
+never compounds and taking off the last reaction lands exactly where it started.
+
+Each answer is cached per `(video, playlist context)`, so reacting, un-reacting
+and re-reacting costs one API call, not three.
+
+Every row also has a ✨ button to do this by hand, which turns into an undo once
+the title has been changed. Undo puts the original yt-dlp name back on disk.
+
+Nothing here runs without an API key — a blank key means the feature is simply
+off, not broken. **Plex shows the new title after its next library scan**, since
+it reads titles from the folder name.
+
 ## Reconciliation
 
 Reality drifts: the app is closed when a link is posted, a file is moved by hand,
@@ -139,8 +179,8 @@ folders — and re-reads playlists, since a playlist can gain videos at any time
 
 ```
 ~/Media/Kid Video Thing/
-  Some_Show_S01E04 [exampleVid1]/
-    Some_Show_S01E04 [exampleVid1].webm
+  Some Show S01E04 [exampleVid1]/
+    Some Show S01E04 [exampleVid1].webm
     poster.jpg
 
 ~/Library/Application Support/kid-video-thing/
@@ -164,6 +204,11 @@ and a Plex server on the same Mac.
   `reaction_removed`
 - Invite the bot to the channel, and paste both tokens into Settings → Slack
 
+**Claude** — paste an API key from console.anthropic.com into Settings → Claude
+to switch on title cleanup. Haiku is the default model; a whole library's worth of
+titles costs a fraction of a cent. Leave it blank and titles are left as yt-dlp
+wrote them.
+
 **Plex** — the token is read automatically from the local install. The library
 needs the Local Media Assets agent enabled and "Use local assets" turned on, or
 the posters are ignored.
@@ -184,5 +229,7 @@ the posters are ignored.
 | `PlexSync` | Periodic read of view stats and playlist membership |
 | `PlaylistSync` | Reactions → playlist membership |
 | `LibraryPruner` | The disk limit |
+| `TitleCleaner` | Title cleanup: the prompt, the rename, the undo |
+| `ClaudeClient` | The Claude API call behind it |
 | `EmojiNames` | Generated shortcode ↔ emoji table |
 | `SingleInstance` | The lock |

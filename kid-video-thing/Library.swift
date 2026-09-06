@@ -48,6 +48,13 @@ struct LibraryVideo: Identifiable {
     var sizeBytes: Int64?
     /// Emoji reacted onto this video's Slack message.
     var tags: [String] = []
+    /// The name yt-dlp gave this video, once its title has been cleaned up.
+    /// Nil means the name on disk is still the original one.
+    var originalName: String?
+
+    /// True once the title has been through a cleanup, so the row can offer to
+    /// put the original back.
+    var isRenamed: Bool { originalName != nil }
 
     var file: URL? { filePath.map { URL(filePath: $0) } }
     var posterURL: URL? { posterPath.map { URL(filePath: $0) } }
@@ -128,7 +135,8 @@ final class Library {
                 posterPath: Self.poster(for: entry.filePath),
                 downloadedAt: file.modified ?? entry.updatedAt,
                 sizeBytes: file.size ?? entry.sizeBytes,
-                tags: entry.tags)
+                tags: entry.tags,
+                originalName: entry.originalName)
             order.append(key)
         }
 

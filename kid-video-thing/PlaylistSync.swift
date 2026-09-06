@@ -32,11 +32,15 @@ final class PlaylistSync {
     private let settings: AppSettings
     private let store: VideoStore
     private let library: Library
+    private let titles: TitleCleaner
 
-    init(settings: AppSettings, store: VideoStore, library: Library) {
+    init(
+        settings: AppSettings, store: VideoStore, library: Library, titles: TitleCleaner
+    ) {
         self.settings = settings
         self.store = store
         self.library = library
+        self.titles = titles
     }
 
     private var client: PlexClient {
@@ -122,6 +126,11 @@ final class PlaylistSync {
                 await store.setTags(id: entry.id, tags: Array(tags))
             }
             await library.refresh()
+
+            // The playlist a video sits in is context for its title: joining one
+            // lets the show name come out, and leaving the last one puts it back.
+            // Runs after the tags are written, so the cleanup sees them.
+            await titles.playlistsChanged(channel: channel, timestamp: timestamp)
         } catch {
             note("\(emoji) failed: \(error.localizedDescription)")
         }

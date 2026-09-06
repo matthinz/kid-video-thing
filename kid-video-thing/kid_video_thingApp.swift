@@ -25,20 +25,26 @@ final class AppModel {
     let playlists: PlaylistSync
     let plex: PlexSync
     let pruner: LibraryPruner
+    let titles: TitleCleaner
 
     private init() {
         settings = .shared
         store = VideoStore()
         downloads = DownloadManager(settings: settings, store: store)
         library = Library(store: store, downloads: downloads)
-        playlists = PlaylistSync(settings: settings, store: store, library: library)
+        titles = TitleCleaner(settings: settings, store: store, library: library)
+        playlists = PlaylistSync(
+            settings: settings, store: store, library: library, titles: titles)
         slack = SlackListener(
             settings: settings, downloads: downloads, store: store, playlists: playlists)
         plex = PlexSync(settings: settings, store: store, library: library)
         pruner = LibraryPruner(settings: settings, store: store, library: library)
 
-        downloads.afterDownload = { [pruner] download in
+        downloads.afterDownload = { [pruner, titles] download in
             await pruner.pruneIfNeeded(keeping: download.videoURL)
+            // After pruning, so a video that was about to be evicted isn't
+            // renamed on its way out the door.
+            await titles.cleanNewDownload(download)
         }
     }
 
@@ -79,6 +85,7 @@ struct kid_video_thingApp: App {
                 .environment(model.plex)
                 .environment(model.pruner)
                 .environment(model.playlists)
+                .environment(model.titles)
         } label: {
             MenuBarIcon()
                 .environment(model.downloads)
@@ -96,6 +103,7 @@ struct kid_video_thingApp: App {
                 .environment(model.plex)
                 .environment(model.pruner)
                 .environment(model.playlists)
+                .environment(model.titles)
         }
     }
 }

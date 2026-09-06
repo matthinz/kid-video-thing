@@ -71,6 +71,93 @@ nonisolated enum MediaLayout {
         return moved
     }
 
+    /// Renames a video's folder and file to `<name> [<id>].<ext>`, leaving the
+    /// poster and the video ID alone.
+    ///
+    /// The ID suffix is kept because everything that finds this file again looks
+    /// for it — `locate(videoID:in:)`, and Plex, which matches its own items back
+    /// to our rows by the ID in the path. The folder and the file are renamed
+    /// together so the layout stays one-folder-per-video; `isOrganized` requires
+    /// the two names to agree.
+    ///
+    /// Returns the video's new location. A rename onto a name already in use is
+    /// left alone rather than clobbering it.
+    @discardableResult
+    static func rename(_ videoFile: URL, to newName: String) throws -> URL {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: videoFile.path) else { return videoFile }
+
+        let organized = try organize(videoFile)
+        let id = videoID(of: organized)
+        let base = sanitize(newName)
+        guard !base.isEmpty else { return organized }
+
+        let folderName = id.map { "\(base) [\($0)]" } ?? base
+        guard folderName != organized.deletingPathExtension().lastPathComponent else {
+            return organized
+        }
+
+        let root = organized.deletingLastPathComponent().deletingLastPathComponent()
+        let newFolder = root.appending(path: folderName, directoryHint: .isDirectory)
+        let newFile = newFolder.appending(
+            path: folderName + "." + organized.pathExtension)
+
+        guard !manager.fileExists(atPath: newFolder.path) else { return organized }
+
+        // The file moves first, while its folder still has the old name: renaming
+        // the folder first would leave the file's own name stale if this threw.
+        let staged = organized.deletingLastPathComponent().appending(
+            path: newFile.lastPathComponent)
+        try manager.moveItem(at: organized, to: staged)
+        do {
+            try manager.moveItem(at: staged.deletingLastPathComponent(), to: newFolder)
+        } catch {
+            try? manager.moveItem(at: staged, to: organized)
+            throw error
+        }
+        return newFile
+    }
+
+    /// The YouTube ID in a file's name, if it carries one.
+    static func videoID(of videoFile: URL) -> String? {
+        let name = videoFile.deletingPathExtension().lastPathComponent
+        guard name.hasSuffix("]"), let open = name.range(of: "[", options: .backwards) else {
+            return nil
+        }
+        let id = String(name[open.upperBound..<name.index(before: name.endIndex)])
+        return YTDLP.isVideoID(id) ? id : nil
+    }
+
+    /// A video file's own name with the ` [<id>]` suffix taken off — what the
+    /// title was before the ID was appended, and what a rename works from.
+    static func baseName(of videoFile: URL) -> String {
+        let name = videoFile.deletingPathExtension().lastPathComponent
+        guard videoID(of: videoFile) != nil,
+            let bracket = name.range(of: " [", options: .backwards)
+        else { return name }
+        return String(name[name.startIndex..<bracket.lowerBound])
+    }
+
+    /// A title, made safe to use as a folder name.
+    ///
+    /// `/` and `:` are the two characters macOS won't take, and square brackets go
+    /// too — a stray `[…]` at the end would be mistaken for the video ID suffix.
+    static func sanitize(_ title: String) -> String {
+        var cleaned = title
+            .components(separatedBy: CharacterSet(charactersIn: "/:\\[]"))
+            .joined(separator: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        // A leading dot would hide the folder; the cap keeps the whole path well
+        // inside the 255-byte limit once the ID and extension are added.
+        if cleaned.count > 120 {
+            cleaned = String(cleaned.prefix(120)).trimmingCharacters(in: .whitespaces)
+        }
+        return cleaned
+    }
+
     /// Removes a video and everything that belongs to it — the whole folder once
     /// it's organized, or the loose file and its old-style poster if not.
     static func remove(_ videoFile: URL) throws {
