@@ -48,13 +48,13 @@ struct LibraryVideo: Identifiable {
     var sizeBytes: Int64?
     /// Emoji reacted onto this video's Slack message.
     var tags: [String] = []
-    /// The name yt-dlp gave this video, once its title has been cleaned up.
-    /// Nil means the name on disk is still the original one.
-    var originalName: String?
+    /// The tidied-up title, if this video has been through a cleanup.
+    var cleanedTitle: String?
+    /// Whether Plex has been pointed at this video's own poster already.
+    var plexPosterLocked = false
 
-    /// True once the title has been through a cleanup, so the row can offer to
-    /// put the original back.
-    var isRenamed: Bool { originalName != nil }
+    /// True once the title has been cleaned, so the row can offer to undo it.
+    var isCleaned: Bool { cleanedTitle != nil }
 
     var file: URL? { filePath.map { URL(filePath: $0) } }
     var posterURL: URL? { posterPath.map { URL(filePath: $0) } }
@@ -66,9 +66,20 @@ struct LibraryVideo: Identifiable {
         download?.isActive ?? false
     }
 
+    /// What this video is called: the cleaned-up title if it has one, and
+    /// otherwise the filename made readable.
+    ///
+    /// A cleaned title lives in the database rather than in the filename. The
+    /// file yt-dlp wrote is left exactly as it found it — renaming it moved the
+    /// video out from under Plex, which then had to work out what it was looking
+    /// at all over again. Plex is told the new title directly instead.
+    var title: String { cleanedTitle ?? originalTitle }
+
     /// The filename, tidied into something readable: yt-dlp writes
-    /// `Some_Show_Title [abc123XYZ_9].webm`, which reads badly in a list.
-    var title: String {
+    /// `Some_Show_Title [abc123XYZ_9].webm`, which reads badly in a list. This is
+    /// what a video is called before anyone cleans it up, and what undoing a
+    /// cleanup goes back to.
+    var originalTitle: String {
         guard let file else { return url }
         var name = file.deletingPathExtension().lastPathComponent
         if let bracket = name.range(of: " [", options: .backwards) {
@@ -136,7 +147,8 @@ final class Library {
                 downloadedAt: file.modified ?? entry.updatedAt,
                 sizeBytes: file.size ?? entry.sizeBytes,
                 tags: entry.tags,
-                originalName: entry.originalName)
+                cleanedTitle: entry.title,
+                plexPosterLocked: entry.plexPosterLocked)
             order.append(key)
         }
 

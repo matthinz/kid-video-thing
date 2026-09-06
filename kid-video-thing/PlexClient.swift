@@ -47,6 +47,20 @@ nonisolated struct PlexClient {
         var emoji: [String] { EmojiNames.characters(in: title) }
     }
 
+    /// One of the poster images Plex is offering for a video.
+    ///
+    /// `provider` is `"local"` for a `poster.jpg` sitting next to the video, and
+    /// nil for a frame Plex grabbed out of the video itself.
+    struct Poster {
+        var provider: String?
+        var selected: Bool
+        /// The `metadata://…` or `media://…` reference Plex wants back when
+        /// choosing this image.
+        var url: String
+
+        var isLocal: Bool { provider == "local" }
+    }
+
     /// A video's membership in a playlist. Removing one needs `playlistItemID`,
     /// which is per-membership and not the same as the video's `ratingKey`.
     struct PlaylistItem {
@@ -57,6 +71,10 @@ nonisolated struct PlexClient {
     /// One video as Plex knows it.
     struct Item {
         var ratingKey: String
+        /// The library section this came from — needed to edit it, since Plex
+        /// takes metadata writes on the section rather than on the item.
+        var sectionKey: String
+        var title: String
         var filePath: String
         var viewCount: Int?
         var lastViewedAt: Date?
@@ -124,6 +142,8 @@ nonisolated struct PlexClient {
 
             return Item(
                 ratingKey: video.attribute("ratingKey") ?? "",
+                sectionKey: key,
+                title: video.attribute("title") ?? "",
                 filePath: file,
                 // Plex leaves these attributes out entirely rather than sending
                 // zero, so absent means "never watched", not "unknown".
@@ -132,6 +152,67 @@ nonisolated struct PlexClient {
                     Date(timeIntervalSince1970: $0)
                 })
         }
+    }
+
+    // MARK: - Titles and artwork
+
+    /// The poster images Plex is offering for a video, and which one it picked.
+    func posters(_ ratingKey: String) async throws -> [Poster] {
+        let document = try await get("/library/metadata/\(ratingKey)/posters")
+        let photos = (try? document.nodes(forXPath: "//Photo")) ?? []
+
+        return photos.compactMap { node -> Poster? in
+            guard let photo = node as? XMLElement, let key = photo.attribute("key") else {
+                return nil
+            }
+            // The key is a URL of its own with the reference we need buried in
+            // its query: `/library/metadata/1/file?url=metadata%3A%2F%2F…`.
+            guard
+                let url = URLComponents(string: key)?
+                    .queryItems?.first(where: { $0.name == "url" })?.value
+            else { return nil }
+
+            return Poster(
+                provider: photo.attribute("provider"),
+                selected: photo.attribute("selected") == "1",
+                url: url)
+        }
+    }
+
+    /// Tells Plex which poster to use for a video.
+    func selectPoster(_ ratingKey: String, url: String) async throws {
+        _ = try await send("PUT", "/library/metadata/\(ratingKey)/poster", query: ["url": url])
+    }
+
+    /// Sets a video's title, and pins the fields we care about.
+    ///
+    /// Locking is the point of this, not a detail. Left unlocked, Plex treats
+    /// both of these as its own to work out — it re-derives the title from the
+    /// filename and re-picks the artwork whenever it refreshes an item, which is
+    /// how a library ends up showing video stills instead of the posters sitting
+    /// right beside the files. A locked field is one Plex stops second-guessing.
+    ///
+    /// Passing `locked: false` hands a field back to Plex, which is what undoing
+    /// a cleanup wants: the title returns to being whatever the filename says.
+    func setTitle(
+        _ ratingKey: String, inSection section: String, title: String, locked: Bool
+    ) async throws {
+        _ = try await send(
+            "PUT", "/library/sections/\(section)/all",
+            query: [
+                "type": "1",
+                "id": ratingKey,
+                "title.value": title,
+                "title.locked": locked ? "1" : "0",
+            ])
+    }
+
+    /// Pins a video's artwork, so Plex stops replacing the poster with a frame
+    /// it picked out of the video.
+    func lockThumb(_ ratingKey: String, inSection section: String) async throws {
+        _ = try await send(
+            "PUT", "/library/sections/\(section)/all",
+            query: ["type": "1", "id": ratingKey, "thumb.locked": "1"])
     }
 
     // MARK: - Playlists

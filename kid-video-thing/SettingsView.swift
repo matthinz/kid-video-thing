@@ -271,10 +271,13 @@ private struct ClaudeSettings: View {
                     """
                     YouTube titles are written for search, not for reading: \
                     "Pizza Bean Mr Bean Cartoon Season 2 Full Episodes Mr Bean \
-                    Official" is the "Pizza Bean" episode. Claude cuts it back and \
-                    the video's folder is renamed on disk, so Plex shows the tidy \
-                    name too. The YouTube ID stays in the filename, so nothing \
-                    loses track of which video it is.
+                    Official" is the "Pizza Bean" episode. Claude cuts it back.
+
+                    Files on disk are never touched. The title is kept here and \
+                    pushed to Plex, where it's pinned so Plex doesn't go back to \
+                    reading it off the filename. Each video's own poster is pinned \
+                    the same way, which stops Plex swapping it for a frame grabbed \
+                    out of the video.
 
                     When a video joins a Plex playlist the title is cleaned again \
                     with the playlist's name as context — in "Mr Bean Cartoon" the \
@@ -436,7 +439,7 @@ private struct SlackSettings: View {
         .environment(
             SlackListener(
                 settings: settings, downloads: downloads, store: store, playlists: playlists))
-        .environment(PlexSync(settings: settings, store: store, library: library))
+        .environment(PlexSync(settings: settings, store: store, library: library, titles: titles))
         .environment(LibraryPruner(settings: settings, store: store, library: library))
         .environment(playlists)
         .environment(titles)

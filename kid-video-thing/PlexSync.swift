@@ -15,9 +15,15 @@ import Observation
 /// - which emoji-named playlists a video belongs to, which is what the emoji on
 ///   each row in the list are showing.
 ///
-/// Nothing is ever written back to Plex, and no reactions are posted to Slack:
-/// reactions belong to whoever put them there. Reacting in Slack is what files a
-/// video into a playlist — see PlaylistSync — and this only reports the result.
+/// No reactions are ever posted to Slack: reactions belong to whoever put them
+/// there. Reacting in Slack is what files a video into a playlist — see
+/// PlaylistSync — and this only reports the result.
+///
+/// Two things do get written back the other way, at the end of each pass: the
+/// titles we hold, and the instruction to use each video's own poster. Both are
+/// ours to decide — see TitleCleaner — and both have to be pushed repeatedly
+/// rather than once, because a video can appear in Plex long after it was
+/// downloaded. Everything Plex is the authority on is still read-only.
 @MainActor
 @Observable
 final class PlexSync {
@@ -32,12 +38,16 @@ final class PlexSync {
     private let settings: AppSettings
     private let store: VideoStore
     private let library: Library
+    private let titles: TitleCleaner
     private var loop: Task<Void, Never>?
 
-    init(settings: AppSettings, store: VideoStore, library: Library) {
+    init(
+        settings: AppSettings, store: VideoStore, library: Library, titles: TitleCleaner
+    ) {
         self.settings = settings
         self.store = store
         self.library = library
+        self.titles = titles
     }
 
     var isRunning: Bool { loop != nil }
@@ -111,6 +121,10 @@ final class PlexSync {
             }
 
             await syncPlaylistTags(client: PlexClient(token: token))
+
+            // Last, and after the tags: a title is cleaned against the playlists
+            // a video is in, so this wants the freshest membership available.
+            await titles.pushToPlex()
 
             matchedCount = matched
             lastSyncedAt = Date()

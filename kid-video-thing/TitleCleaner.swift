@@ -16,11 +16,19 @@ import Observation
 /// right in the menu bar and wrong on the television, which is the screen that
 /// matters.
 ///
+/// The file on disk is never touched. Renaming it worked, but it moved the video
+/// out from under Plex, which then had to work out what it was looking at all
+/// over again. The title lives in our own database instead and is pushed to Plex
+/// directly — and pinned there, because an unlocked title is one Plex will
+/// happily re-derive from the filename at the next refresh.
+///
+/// That leaves the filename as the thing nobody edits, which makes it a reliable
+/// place to start from: every cleanup works from the name yt-dlp chose, so
+/// guesswork never compounds and undo always has somewhere to land.
+///
 /// Playlist membership is context, not decoration: someone browsing the
 /// "Mr Bean Cartoon" playlist already knows it's Mr Bean, so the show name comes
-/// out of the title while the video sits there. The name yt-dlp originally chose
-/// is kept, so every cleanup starts from the same place and undo always has
-/// somewhere to land.
+/// out of the title while the video sits there.
 @MainActor
 @Observable
 final class TitleCleaner {
@@ -57,27 +65,30 @@ final class TitleCleaner {
         await library.refresh()
         guard let video = library.videos.first(where: { $0.filePath == path })
         else { return }
-        await clean(video)
+        await clean(video, thenPush: true)
     }
 
-    /// The "Magic Rename" button, and the re-run after a playlist change.
+    /// The "Magic Rename" button: clean this one video and tell Plex.
     func clean(_ video: LibraryVideo) async {
+        await clean(video, thenPush: true)
+    }
+
+    /// `thenPush` is false when the caller is working through several videos and
+    /// will push once at the end — a push re-reads every Plex library section, so
+    /// doing it per video would make a playlist change quadratic for no gain.
+    private func clean(_ video: LibraryVideo, thenPush: Bool) async {
         guard isConfigured else {
             note("No Claude API key — add one in Settings → Claude.")
-            return
-        }
-        guard let file = video.file, video.fileExists else {
-            note("\(video.title): no file on disk to rename.")
             return
         }
         guard !working.contains(video.id) else { return }
         working.insert(video.id)
         defer { working.remove(video.id) }
 
-        // Always start from what yt-dlp called it. Cleaning an already-cleaned
-        // title compounds the guesswork, and drops information a later playlist
-        // change might need.
-        let original = video.originalName ?? MediaLayout.baseName(of: file)
+        // Always start from what yt-dlp called it, never from a title we already
+        // produced: cleaning a cleaned title compounds the guesswork and throws
+        // away information a later playlist change might need.
+        let original = video.originalTitle
         let playlists = await playlistNames(for: video)
         let context = playlists.sorted().joined(separator: ", ")
 
@@ -89,34 +100,47 @@ final class TitleCleaner {
                 title = try await ask(original: original, playlists: playlists)
                 await store.cacheTitle(videoID: video.id, context: context, title: title)
             }
-            try await apply(title, to: video, file: file, original: original, context: context)
+            for id in video.recordIDs {
+                await store.setTitle(id: id, title: title, context: context)
+            }
+            await library.refresh()
             note(describe(original: original, now: title, playlists: playlists))
         } catch {
             note("\(video.title): \(error.localizedDescription)")
-        }
-    }
-
-    /// Puts a video's original yt-dlp name back on disk.
-    func undo(_ video: LibraryVideo) async {
-        guard let original = video.originalName else { return }
-        guard let file = video.file, video.fileExists else {
-            note("\(video.title): no file on disk to rename back.")
             return
         }
+
+        // Best effort: Plex may not have scanned this video yet, in which case
+        // there is nothing to write to and the next sync will catch it.
+        if thenPush { await pushToPlex() }
+    }
+
+    /// Drops a cleaned title, going back to whatever the filename says.
+    ///
+    /// Plex is handed the field back rather than pinned to the old title: an
+    /// unlocked title is one Plex derives from the filename itself, which is
+    /// exactly where undo wants to end up.
+    func undo(_ video: LibraryVideo) async {
+        guard video.isCleaned else { return }
         guard !working.contains(video.id) else { return }
         working.insert(video.id)
         defer { working.remove(video.id) }
 
-        do {
-            let restored = try MediaLayout.rename(file, to: original)
-            for id in video.recordIDs {
-                await store.clearRename(id: id, filePath: restored.path)
-            }
-            await library.refresh()
-            note("Put back: \(original)")
-        } catch {
-            note("\(video.title): \(error.localizedDescription)")
+        let original = video.originalTitle
+        for id in video.recordIDs {
+            await store.clearTitle(id: id)
         }
+        await library.refresh()
+
+        if let client = plexClient, let item = await plexItem(for: video.id, using: client) {
+            do {
+                try await client.setTitle(
+                    item.ratingKey, inSection: item.sectionKey, title: original, locked: false)
+            } catch {
+                note("Couldn't hand \"\(original)\" back to Plex: \(error.localizedDescription)")
+            }
+        }
+        note("Put back: \(original)")
     }
 
     /// Re-runs cleanup for every video on a Slack message whose playlist
@@ -131,9 +155,10 @@ final class TitleCleaner {
         await library.refresh()
         let message = SlackMessage(channel: channel, timestamp: timestamp)
         for video in library.videos where video.messages.contains(message) {
-            guard video.fileExists else { continue }
-            await clean(video)
+            guard video.status == .done else { continue }
+            await clean(video, thenPush: false)
         }
+        await pushToPlex()
     }
 
     // MARK: - The call
@@ -183,22 +208,126 @@ final class TitleCleaner {
             .map(String.init)?
             .trimmingCharacters(in: CharacterSet(charactersIn: " \t\"'"))
             ?? ""
-        guard !MediaLayout.sanitize(title).isEmpty else {
+        guard !Self.normalize(title).isEmpty else {
             throw ClaudeError.badResponse("no usable title in \"\(reply.prefix(80))\"")
         }
-        return title
+        return Self.normalize(title)
     }
 
-    /// Renames the file and records where it went, against every row that shares it.
-    private func apply(
-        _ title: String, to video: LibraryVideo, file: URL, original: String, context: String
-    ) async throws {
-        let renamed = try MediaLayout.rename(file, to: title)
-        for id in video.recordIDs {
-            await store.recordRename(
-                id: id, filePath: renamed.path, originalName: original, titleContext: context)
+    /// Collapses whitespace and caps the length. Nothing here is about the
+    /// filesystem any more — the title only has to be sane to read and to store.
+    private static func normalize(_ title: String) -> String {
+        let collapsed = title
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return collapsed.count > 200
+            ? String(collapsed.prefix(200)).trimmingCharacters(in: .whitespaces)
+            : collapsed
+    }
+
+    // MARK: - Telling Plex
+
+    private var plexClient: PlexClient? {
+        let token =
+            settings.plexToken.isEmpty
+            ? (PlexClient.discoverToken() ?? "")
+            : settings.plexToken
+        return token.isEmpty ? nil : PlexClient(token: token)
+    }
+
+    private func plexItem(for videoID: String, using client: PlexClient) async
+        -> PlexClient.Item?
+    {
+        guard let items = try? await client.allItems() else { return nil }
+        return items.first { $0.youTubeID == videoID }
+    }
+
+    /// Brings Plex into line with the titles and posters we hold.
+    ///
+    /// Both halves are pinned once set, because Plex treats an unlocked title and
+    /// an unlocked poster as its own business: it re-derives the title from the
+    /// filename and re-picks the artwork whenever it refreshes an item, which is
+    /// how a library ends up showing video stills instead of the posters sitting
+    /// right beside the files.
+    ///
+    /// Safe to call whenever. Titles are compared against what Plex currently
+    /// shows, so a video already in step costs nothing; posters are asked about
+    /// only once per video, since whether a field is locked can't be read back
+    /// from the bulk listing and checking each one every sync would mean a
+    /// request per video, forever.
+    func pushToPlex() async {
+        guard let client = plexClient else { return }
+
+        let items: [PlexClient.Item]
+        do {
+            items = try await client.allItems()
+        } catch {
+            note("Couldn't reach Plex to update titles: \(error.localizedDescription)")
+            return
         }
-        await library.refresh()
+
+        var byID: [String: PlexClient.Item] = [:]
+        for item in items {
+            if let id = item.youTubeID { byID[id] = item }
+        }
+
+        // Rows are per Slack message; several can share one video and one file.
+        // Group them so Plex is told once and every row learns the outcome.
+        var rowsForVideo: [String: [VideoStore.Entry]] = [:]
+        for entry in await store.allEntries() {
+            guard let id = CoverArt.videoID(from: entry.url) else { continue }
+            rowsForVideo[id, default: []].append(entry)
+        }
+
+        var titlesPushed = 0
+        var postersPinned = 0
+
+        for (videoID, rows) in rowsForVideo {
+            guard let item = byID[videoID] else { continue }
+
+            if let wanted = rows.compactMap(\.title).first, item.title != wanted {
+                do {
+                    try await client.setTitle(
+                        item.ratingKey, inSection: item.sectionKey, title: wanted, locked: true)
+                    titlesPushed += 1
+                } catch {
+                    note("Couldn't set \"\(wanted)\" in Plex: \(error.localizedDescription)")
+                }
+            }
+
+            if rows.contains(where: { !$0.plexPosterLocked }) {
+                if await pinPoster(item, using: client) {
+                    for row in rows { await store.setPlexPosterLocked(id: row.id, true) }
+                    postersPinned += 1
+                }
+            }
+        }
+
+        if titlesPushed > 0 || postersPinned > 0 {
+            note(
+                "Plex updated: \(titlesPushed) title(s), \(postersPinned) poster(s) pinned.")
+            await library.refresh()
+        }
+    }
+
+    /// Points Plex at a video's own `poster.jpg` and pins it there.
+    ///
+    /// Returns false when there's nothing to do or the attempt failed, so the
+    /// video stays on the list to try again next time.
+    private func pinPoster(_ item: PlexClient.Item, using client: PlexClient) async -> Bool {
+        do {
+            let posters = try await client.posters(item.ratingKey)
+            guard let local = posters.first(where: \.isLocal) else { return false }
+            if !local.selected {
+                try await client.selectPoster(item.ratingKey, url: local.url)
+            }
+            try await client.lockThumb(item.ratingKey, inSection: item.sectionKey)
+            return true
+        } catch {
+            note("Couldn't pin a poster in Plex: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// The Plex playlists this video is in, by name.
