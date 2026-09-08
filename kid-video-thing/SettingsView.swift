@@ -26,11 +26,45 @@ private struct GeneralSettings: View {
     @Environment(AppSettings.self) private var settings
     @Environment(Library.self) private var library
     @Environment(LibraryPruner.self) private var pruner
+    @State private var loginItem = LoginItem()
 
     var body: some View {
         @Bindable var settings = settings
 
         Form {
+            Section("Startup") {
+                Toggle(
+                    "Open at Login",
+                    isOn: Binding(
+                        get: { loginItem.isEnabled },
+                        set: { loginItem.setEnabled($0) }))
+                Text(
+                    """
+                    The app has no Dock icon and nothing to click, so it only \
+                    catches links posted while it's running.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if loginItem.needsApproval {
+                    HStack {
+                        Label(
+                            "Waiting to be allowed in System Settings",
+                            systemImage: "exclamationmark.triangle")
+                        Spacer()
+                        Button("Open Login Items…") { loginItem.openSystemSettings() }
+                    }
+                    .font(.callout)
+                }
+
+                if let error = loginItem.error {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                }
+            }
+
             Section("Downloads") {
                 LabeledContent("Save videos to") {
                     HStack {
@@ -96,6 +130,8 @@ private struct GeneralSettings: View {
         }
         .formStyle(.grouped)
         .task { await library.refresh() }
+        // The setting can be changed in System Settings while we're open.
+        .onAppear { loginItem.refresh() }
     }
 
     private var used: Int64 {

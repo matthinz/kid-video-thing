@@ -218,6 +218,12 @@ wrote them. Titles are pushed to Plex, so this needs the Plex side working too.
 needs the Local Media Assets agent enabled and "Use local assets" turned on, or
 the posters are ignored.
 
+**Open at Login** — Settings → General. Nothing about it is stored in our own
+settings: macOS owns it, so the checkbox reads back whatever System Settings →
+General → Login Items says. It registers the copy of the app that's running, so
+install it somewhere permanent — `make install` puts it in `~/Applications` —
+before switching it on.
+
 ## Layout
 
 | File | Role |
@@ -238,4 +244,5 @@ the posters are ignored.
 | `ClaudeClient` | The Claude API call behind it |
 | `EmojiNames` | Generated shortcode ↔ emoji table |
 | `SingleInstance` | The lock |
+| `LoginItem` | Open at Login, via SMAppService |
 | `Tools/MakeIcon.swift` | Draws the app icon from the menu bar's SF Symbol — `make icon` |
