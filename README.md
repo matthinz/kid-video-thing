@@ -233,3 +233,4 @@ the posters are ignored.
 | `ClaudeClient` | The Claude API call behind it |
 | `EmojiNames` | Generated shortcode ↔ emoji table |
 | `SingleInstance` | The lock |
+| `Tools/MakeIcon.swift` | Draws the app icon from the menu bar's SF Symbol — `make icon` |
