@@ -75,8 +75,10 @@ Videos are matched to Plex items by the **YouTube ID in the filename** — Plex
 reports each item's file path, and `… [exampleVid1].webm` identifies it more
 durably than a path that might change.
 
-This direction is strictly read-only. Plex is never modified by the sync, and no
-Slack reactions are posted as a result of it.
+No Slack reactions are posted as a result of this. Everything Plex is the
+authority on is read-only — the app never edits a view count or a playlist here.
+The sync does finish by pushing the two things *we* decide, titles and which
+poster to use, back the other way; see Flow 6.
 
 ## Flow 3 — the app back to Slack: status
 
@@ -127,38 +129,41 @@ Cartoon Season 2 Full Episodes Mr Bean Official" is the "Pizza Bean" episode wit
 the search terms bolted on, and that's what ends up on the shelf in Plex.
 
 When a video arrives, its title goes to the Claude API and comes back cut down to
-the part that identifies it. **The video's folder and file are then renamed on
-disk** — a database-only title would look right in the menu bar and wrong on the
-television, which is the screen that matters.
+the part that identifies it. **Nothing on disk changes.** The title is kept in the
+videos table and pushed to Plex, which is the only place it needs to be right.
 
 ```
-Pizza_Bean_Mr_Bean_Cartoon_Season_2_Full_Episodes_Mr_Bean_Official [exampleVid1]/
-                              ↓
-Pizza Bean [exampleVid1]/
-  Pizza Bean [exampleVid1].webm
-  poster.jpg
+on disk (never touched)   the record        Plex
+Arcade_Trouble_Mr_Bean_…  title =           title  = "Arcade Trouble"  (locked)
+  [Ih76cnYuEoY].webm      "Arcade Trouble"  poster = poster.jpg        (locked)
+poster.jpg
 ```
 
-The `[exampleVid1]` suffix is never touched. Everything that finds a video again
-looks for that ID rather than the name — Plex matching, the ❌ reaction, the
-re-sync — so the title is the only part that's actually free to change.
+Renaming the files was tried first and worked, but it meant moving a video out
+from under Plex every time a title changed, leaving Plex to work out what it was
+looking at all over again. The filename is now the one name nobody edits, which
+makes it a dependable place to start from: every cleanup works from what yt-dlp
+chose, so guesswork never compounds and undo always has somewhere to land.
 
-**Playlists are context.** Someone browsing "Mr Bean Cartoon" can already see
-whose cartoon it is, so joining that playlist re-runs the cleanup with the
-playlist name in hand and the show name drops out of the title. Removing the
-reaction runs it again with what's left. Every cleanup starts from the name
-yt-dlp originally chose rather than from the previous cleaned title, so guesswork
-never compounds and taking off the last reaction lands exactly where it started.
+**Both fields are locked in Plex, and that's the point.** An unlocked field is one
+Plex treats as its own to work out — it re-derives the title from the filename and
+re-picks the artwork whenever it refreshes an item. That is how a library ends up
+showing video stills instead of the posters sitting right beside the files.
+Locking is what makes a title or a poster stay put.
 
-Each answer is cached per `(video, playlist context)`, so reacting, un-reacting
-and re-reacting costs one API call, not three.
+**Playlists are context.** Someone browsing "Mr Bean Cartoon" can already see whose
+cartoon it is, so joining that playlist re-runs the cleanup with the playlist name
+in hand and the show name drops out of the title. Removing the reaction runs it
+again with what's left. Each answer is cached per `(video, playlist context)`, so
+reacting, un-reacting and re-reacting costs one API call, not three.
 
 Every row also has a ✨ button to do this by hand, which turns into an undo once
-the title has been changed. Undo puts the original yt-dlp name back on disk.
+the title has been changed. Undo drops our title and hands the field back to Plex
+unlocked, so Plex goes back to reading the filename — exactly where it started.
 
-Nothing here runs without an API key — a blank key means the feature is simply
-off, not broken. **Plex shows the new title after its next library scan**, since
-it reads titles from the folder name.
+Pushing to Plex is retried rather than done once: a video can appear in Plex long
+after it was downloaded, so every sync brings the two back into line. Nothing here
+runs without an API key — a blank key means the feature is simply off, not broken.
 
 ## Reconciliation
 
@@ -179,8 +184,8 @@ folders — and re-reads playlists, since a playlist can gain videos at any time
 
 ```
 ~/Media/Kid Video Thing/
-  Some Show S01E04 [exampleVid1]/
-    Some Show S01E04 [exampleVid1].webm
+  Some_Show_S01E04 [exampleVid1]/
+    Some_Show_S01E04 [exampleVid1].webm
     poster.jpg
 
 ~/Library/Application Support/kid-video-thing/
@@ -207,7 +212,7 @@ and a Plex server on the same Mac.
 **Claude** — paste an API key from console.anthropic.com into Settings → Claude
 to switch on title cleanup. Haiku is the default model; a whole library's worth of
 titles costs a fraction of a cent. Leave it blank and titles are left as yt-dlp
-wrote them.
+wrote them. Titles are pushed to Plex, so this needs the Plex side working too.
 
 **Plex** — the token is read automatically from the local install. The library
 needs the Local Media Assets agent enabled and "Use local assets" turned on, or
@@ -226,10 +231,10 @@ the posters are ignored.
 | `MediaLayout` | Folder-per-video layout, migration, deletion |
 | `CoverArt` | Thumbnail fetch and poster composition |
 | `PlexClient` | Plex HTTP API |
-| `PlexSync` | Periodic read of view stats and playlist membership |
+| `PlexSync` | Periodic read of view stats and playlist membership; pushes titles and posters back |
 | `PlaylistSync` | Reactions → playlist membership |
 | `LibraryPruner` | The disk limit |
-| `TitleCleaner` | Title cleanup: the prompt, the rename, the undo |
+| `TitleCleaner` | Title cleanup: the prompt, the record, the push to Plex |
 | `ClaudeClient` | The Claude API call behind it |
 | `EmojiNames` | Generated shortcode ↔ emoji table |
 | `SingleInstance` | The lock |

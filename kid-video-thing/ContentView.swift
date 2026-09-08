@@ -249,7 +249,7 @@ private struct VideoRow: View {
         if let download = video.download, !download.log.isEmpty {
             LogButton(download: download)
         }
-        if video.fileExists {
+        if video.status == .done {
             MagicRenameButton(video: video)
         }
         if video.fileExists, let file = video.file {
@@ -267,7 +267,8 @@ private struct VideoRow: View {
 ///
 /// One button with two states rather than two buttons: a video is either wearing
 /// its cleaned-up name or its original one, and the row is too narrow to explain
-/// both at once.
+/// both at once. Nothing on disk changes either way; the title is ours and gets
+/// pushed to Plex.
 private struct MagicRenameButton: View {
     @Environment(TitleCleaner.self) private var titles
     let video: LibraryVideo
@@ -275,14 +276,14 @@ private struct MagicRenameButton: View {
     var body: some View {
         if titles.isWorking(video) {
             ProgressView().controlSize(.small)
-        } else if video.isRenamed {
+        } else if video.isCleaned {
             Button {
                 Task { await titles.undo(video) }
             } label: {
                 Image(systemName: "arrow.uturn.backward")
             }
             .buttonStyle(.borderless)
-            .help("Undo magic rename — put \"\(originalTitle)\" back")
+            .help("Undo magic rename — go back to \"\(video.originalTitle)\"")
         } else {
             Button {
                 Task { await titles.clean(video) }
@@ -296,10 +297,6 @@ private struct MagicRenameButton: View {
                     ? "Magic rename — tidy this title with Claude"
                     : "Add a Claude API key in Settings to use magic rename")
         }
-    }
-
-    private var originalTitle: String {
-        (video.originalName ?? "").replacingOccurrences(of: "_", with: " ")
     }
 }
 
@@ -437,6 +434,6 @@ private struct Poster: View {
             SlackListener(
                 settings: settings, downloads: downloads, store: store, playlists: playlists))
         .environment(library)
-        .environment(PlexSync(settings: settings, store: store, library: library))
+        .environment(PlexSync(settings: settings, store: store, library: library, titles: titles))
         .environment(titles)
 }

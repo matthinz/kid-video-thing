@@ -37,13 +37,13 @@ final class AppModel {
             settings: settings, store: store, library: library, titles: titles)
         slack = SlackListener(
             settings: settings, downloads: downloads, store: store, playlists: playlists)
-        plex = PlexSync(settings: settings, store: store, library: library)
+        plex = PlexSync(settings: settings, store: store, library: library, titles: titles)
         pruner = LibraryPruner(settings: settings, store: store, library: library)
 
         downloads.afterDownload = { [pruner, titles] download in
             await pruner.pruneIfNeeded(keeping: download.videoURL)
-            // After pruning, so a video that was about to be evicted isn't
-            // renamed on its way out the door.
+            // After pruning, so a video that was about to be evicted doesn't get
+            // a title cleaned up on its way out the door.
             await titles.cleanNewDownload(download)
         }
     }

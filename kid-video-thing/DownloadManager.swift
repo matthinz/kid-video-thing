@@ -167,31 +167,14 @@ final class DownloadManager {
             try settings.ensureDownloadDirectoryExists()
 
             let directory = settings.downloadDirectory
-
-            // yt-dlp decides "have I got this already?" by the filename it would
-            // write — `<current YouTube title> [<id>]`. Once a title has been
-            // cleaned up, that name no longer matches what's on disk, so yt-dlp
-            // would fetch the whole video again into a second folder and the tidy
-            // name would be lost. Ask by video ID instead, which is what the rest
-            // of the app identifies a video by and what survives a rename.
-            if let id = CoverArt.videoID(from: download.videoURL),
-                let existing = Self.locateFile(videoID: id, in: directory)
-            {
-                download.log.append(
-                    "[download] \(existing.lastPathComponent) is already here")
-                download.destination = existing
-            } else {
-                try await YTDLP.download(
-                    videoURL: download.videoURL,
-                    into: directory,
-                    executable: executable
-                ) { line in
-                    download.log.append(line)
-                    if download.log.count > 500 {
-                        download.log.removeFirst(download.log.count - 500)
-                    }
-                    Self.apply(line: line, to: download, directory: directory)
-                }
+            try await YTDLP.download(
+                videoURL: download.videoURL,
+                into: directory,
+                executable: executable
+            ) { line in
+                download.log.append(line)
+                if download.log.count > 500 { download.log.removeFirst(download.log.count - 500) }
+                Self.apply(line: line, to: download, directory: directory)
             }
 
             // Belt and braces: yt-dlp's phrasing varies with version and format,

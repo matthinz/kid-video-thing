@@ -37,12 +37,16 @@ actor VideoStore {
         var sizeBytes: Int64?
         /// Emoji reacted onto this video's Slack message.
         var tags: [String] = []
-        /// The name yt-dlp gave this video, kept from the first rename so undo
-        /// always has something to go back to. Nil means it's never been renamed.
-        var originalName: String?
-        /// The playlist context the current title was cleaned against — the
-        /// playlist emoji, sorted and joined. Empty means "no playlist".
+        /// The tidied-up title, if this video has been through a cleanup. Nil
+        /// means nobody has changed it and the filename still speaks for itself.
+        var title: String?
+        /// The playlist context `title` was cleaned against — the playlist names,
+        /// sorted and joined. Empty means "no playlist".
         var titleContext: String?
+        /// Whether Plex has been told to use this video's local poster and to
+        /// stop picking its own. Set once the push succeeds, so a sync doesn't
+        /// re-ask Plex about every video it has already dealt with.
+        var plexPosterLocked: Bool = false
     }
 
     /// Nil when the database couldn't be opened — every operation then becomes a
@@ -99,7 +103,8 @@ actor VideoStore {
         // ALTER fails harmlessly once they're there, so the error is the check.
         for column in [
             "view_count INTEGER", "last_viewed_at REAL", "size_bytes INTEGER", "tags TEXT",
-            "original_name TEXT", "title_context TEXT",
+            "original_name TEXT", "title_context TEXT", "title TEXT",
+            "plex_poster_locked INTEGER NOT NULL DEFAULT 0",
         ] {
             sqlite3_exec(handle, "ALTER TABLE videos ADD COLUMN \(column);", nil, nil, nil)
         }
@@ -222,46 +227,49 @@ actor VideoStore {
         if sqlite3_step(statement) != SQLITE_DONE { log("Tag update failed: \(lastError)") }
     }
 
-    /// Records where a video ended up after a rename, and what it started as.
+    /// Stores the tidied-up title for a video.
     ///
-    /// `originalName` is only written the first time — every later rename starts
-    /// from the same yt-dlp name, so undo always lands back at the real original
-    /// rather than at whatever the previous cleanup produced.
-    func recordRename(
-        id: Int64, filePath: String, originalName: String, titleContext: String
-    ) {
+    /// The file on disk is never touched — Plex is told about the new title
+    /// separately, and the menu bar list reads it from here. That keeps the name
+    /// something we own rather than something we have to keep re-deriving from a
+    /// filename, and means a title can change without anything on disk moving.
+    func setTitle(id: Int64, title: String, context: String) {
         let sql = """
-            UPDATE videos SET
-                file_path = ?,
-                original_name = COALESCE(original_name, ?),
-                title_context = ?,
-                updated_at = ?
-            WHERE id = ?;
+            UPDATE videos SET title = ?, title_context = ?, updated_at = ? WHERE id = ?;
             """
         guard let statement = prepare(sql) else { return }
         defer { sqlite3_finalize(statement) }
 
-        bind(statement, 1, filePath)
-        bind(statement, 2, originalName)
-        bind(statement, 3, titleContext)
-        sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
-        sqlite3_bind_int64(statement, 5, id)
-        if sqlite3_step(statement) != SQLITE_DONE { log("Rename update failed: \(lastError)") }
+        bind(statement, 1, title)
+        bind(statement, 2, context)
+        sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(statement, 4, id)
+        if sqlite3_step(statement) != SQLITE_DONE { log("Title update failed: \(lastError)") }
     }
 
-    /// Forgets that a video was ever renamed, after its file has been put back.
-    func clearRename(id: Int64, filePath: String) {
+    /// Forgets a cleaned title, putting the video back to whatever its filename
+    /// says.
+    func clearTitle(id: Int64) {
         let sql = """
-            UPDATE videos SET file_path = ?, original_name = NULL, title_context = NULL,
-                updated_at = ? WHERE id = ?;
+            UPDATE videos SET title = NULL, title_context = NULL, updated_at = ? WHERE id = ?;
             """
         guard let statement = prepare(sql) else { return }
         defer { sqlite3_finalize(statement) }
 
-        bind(statement, 1, filePath)
-        sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
-        sqlite3_bind_int64(statement, 3, id)
-        if sqlite3_step(statement) != SQLITE_DONE { log("Rename clear failed: \(lastError)") }
+        sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(statement, 2, id)
+        if sqlite3_step(statement) != SQLITE_DONE { log("Title clear failed: \(lastError)") }
+    }
+
+    /// Remembers that Plex has been pointed at this video's own poster.
+    func setPlexPosterLocked(id: Int64, _ locked: Bool) {
+        let sql = "UPDATE videos SET plex_poster_locked = ? WHERE id = ?;"
+        guard let statement = prepare(sql) else { return }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int(statement, 1, locked ? 1 : 0)
+        sqlite3_bind_int64(statement, 2, id)
+        if sqlite3_step(statement) != SQLITE_DONE { log("Poster flag failed: \(lastError)") }
     }
 
     /// A title already cleaned for this video under this playlist context.
@@ -301,7 +309,8 @@ actor VideoStore {
     private static let columns =
         """
         id, channel, message_ts, url, file_path, status, view_count, last_viewed_at, \
-        created_at, updated_at, size_bytes, tags, original_name, title_context
+        created_at, updated_at, size_bytes, tags, title, title_context, \
+        plex_poster_locked
         """
 
     /// Everything downloaded for one Slack message, newest first.
@@ -375,8 +384,9 @@ actor VideoStore {
                         ? nil
                         : sqlite3_column_int64(statement, 10),
                     tags: (text(statement, 11) ?? "").split(separator: " ").map(String.init),
-                    originalName: text(statement, 12),
-                    titleContext: text(statement, 13)))
+                    title: text(statement, 12),
+                    titleContext: text(statement, 13),
+                    plexPosterLocked: sqlite3_column_int(statement, 14) != 0))
         }
         return entries
     }
